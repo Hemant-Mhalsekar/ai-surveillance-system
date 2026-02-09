@@ -73,8 +73,6 @@ app/
   main.py
   modules/
     detector_yolo.py
-    behaviour.py
-    tracker.py
     suspicious_rules.py
   utils/
     draw_utils.py
@@ -107,7 +105,7 @@ streamlit run dashboard/dashboard_app.py
 ```
 
 ## Notes
-- Update `app/config.py` to set the default video path, restricted zones, tracking, and behaviour thresholds.
+- Update `app/config.py` to set the default video path, restricted zones, and thresholds.
 - Place sample videos in `data/videos/`.
 - Logged events are stored in `data/logs/events.csv`.
 
