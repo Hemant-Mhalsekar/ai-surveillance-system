@@ -7,11 +7,24 @@ import streamlit as st
 # ✅ Fix import path for Windows + Streamlit
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from app.config import (
+    BEHAVIOUR_WINDOW_SECONDS,
+    INTRUSION_ZONE_RATIO,
+    LOITERING_MIN_DURATION,
+    LOITERING_STILLNESS_RATIO,
+    MAX_PEOPLE_ALLOWED,
+    RESTRICTED_ZONE,
+    RUNNING_SPEED_THRESHOLD,
+    STILLNESS_SPEED_THRESHOLD,
+    TRACK_MAX_AGE,
+    TRACK_MAX_DISTANCE,
+)
+from app.modules.behaviour import classify_behaviour, extract_features
 from app.modules.detector_yolo import YOLOPersonDetector
+from app.modules.tracker import SimpleTracker
 from app.utils.logger import log_event, init_log_file
 from app.utils.snapshot_utils import save_snapshot
 from app.modules.suspicious_rules import detect_suspicious_events
-from app.config import RESTRICTED_ZONE, MAX_PEOPLE_ALLOWED
 
 # ----------------------------
 # Streamlit Page Config
@@ -109,18 +122,26 @@ with col2:
 # ----------------------------
 # Helper Functions
 # ----------------------------
-def draw_person_boxes(frame, detections):
+def draw_person_boxes(frame, tracks, behaviour_map):
     # Text will remain clean even in 1080p
     font_scale = 0.7
     thickness = 2
 
-    for d in detections:
-        x1, y1, x2, y2 = d["bbox"]
-        conf = d["conf"]
+    for track in tracks:
+        x1, y1, x2, y2 = track.bbox
+        behaviour = behaviour_map.get(track.track_id, "Observing")
+        color = (0, 255, 0) if behaviour == "Normal movement" else (0, 0, 255)
 
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(frame, f"Person {conf:.2f}", (x1, max(25, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 0), thickness)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            frame,
+            f"ID {track.track_id} | {behaviour}",
+            (x1, max(25, y1 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            color,
+            thickness,
+        )
     return frame
 
 
@@ -164,6 +185,7 @@ detector = YOLOPersonDetector(model_name=model_name, conf=conf_threshold)
 if st.session_state.run:
     init_log_file()
     cap = cv2.VideoCapture(video_path)
+    tracker = SimpleTracker(max_distance=TRACK_MAX_DISTANCE, max_age=TRACK_MAX_AGE)
 
     if not cap.isOpened():
         st.error(f"❌ Could not open video: {video_path}")
@@ -202,10 +224,36 @@ if st.session_state.run:
                 )
 
             detections = cached_scaled_detections
+            bboxes = [d["bbox"] for d in detections]
+            now = time.time()
+            tracks = tracker.update(bboxes, timestamp=now)
+
+            behaviour_map = {}
+            behaviour_events = []
+            for track in tracks:
+                features = extract_features(
+                    track=track,
+                    window_seconds=BEHAVIOUR_WINDOW_SECONDS,
+                    stillness_speed_threshold=STILLNESS_SPEED_THRESHOLD,
+                    restricted_zone=RESTRICTED_ZONE,
+                    current_time=now,
+                )
+                behaviour = "Observing"
+                if features:
+                    behaviour = classify_behaviour(
+                        features=features,
+                        running_speed_threshold=RUNNING_SPEED_THRESHOLD,
+                        loitering_stillness_ratio=LOITERING_STILLNESS_RATIO,
+                        loitering_min_duration=LOITERING_MIN_DURATION,
+                        intrusion_zone_ratio=INTRUSION_ZONE_RATIO,
+                    )
+                behaviour_map[track.track_id] = behaviour
+                if behaviour not in {"Normal movement", "Observing"}:
+                    behaviour_events.append(f"{behaviour} (ID {track.track_id})")
 
             # Draw restricted zone + boxes on original frame
             frame = draw_restricted_zone(frame, RESTRICTED_ZONE)
-            frame = draw_person_boxes(frame, detections)
+            frame = draw_person_boxes(frame, tracks, behaviour_map)
 
             # Suspicious Events
             events = detect_suspicious_events(
@@ -213,6 +261,7 @@ if st.session_state.run:
                 restricted_zone=RESTRICTED_ZONE,
                 max_people_allowed=MAX_PEOPLE_ALLOWED
             )
+            events = list(dict.fromkeys(events + behaviour_events))
 
             # FPS calculation
             curr_time = time.time()
